@@ -32,6 +32,10 @@ NBD_ROOT_SERVER="192.168.1.1"
 NBD_ROOT_PORT="2000"
 NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
 
+# defaults for booting from an nfs root
+NFS_ROOT_SERVER="192.168.1.1:/var/lib/tftpboot"
+NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
+
 # mount all needed special filesystems
   /bin/busybox mount -t devtmpfs none /dev
   /bin/busybox mount -t proc none /proc
@@ -55,8 +59,8 @@ NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
       fastboot)
         FASTBOOT=yes
         ;;
-      netboot)
-        NETBOOT=yes
+      netboot=*)
+        NETBOOT="${arg#netboot=}"
         ;;
       nbdroot=*)
         nbdroot="${arg#nbdroot=}"
@@ -71,6 +75,9 @@ NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
         ;;
       nfsoverlay=*)
         NFS_OVERLAY="${arg#nfsoverlay=}"
+        ;;
+      nfsroot=*)
+        NFS_ROOT_SERVER="${arg#nfsroot=}"
         ;;
     esac
   done
@@ -163,6 +170,37 @@ NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
     mount_part "$NFS_OVERLAY/$OVERLAY_DIR" "/sysroot/storage" "rw,nolock" "nfs"
   }
 
+  mount_nfs() {
+    OVERLAY_DIR=`cat /sys/class/net/eth0/address | /bin/busybox tr -d :`
+
+    mount_part "$NFS_ROOT_SERVER" "/flash" "ro,nolock" "nfs" 
+
+    if [ -f "/flash/$IMAGE_SYSTEM" ]; then
+      mount_part "/flash/$IMAGE_SYSTEM" "/sysroot" "ro,loop"
+      [ "$ERR_ENV" -ne "0" ] && debug_shell
+    else
+      error "INIT_2" "Could not find system."
+      debug_shell
+    fi
+
+    # move /flash and /storage to /sysroot
+    /bin/busybox mount --move /flash /sysroot/flash
+
+    if [ ! -e /sysroot/sbin/init ]; then
+      error "INIT_2" "Could not mount NFS root from $NFS_ROOT_SERVER"
+      debug_shell
+    fi
+ 
+    mount_part "$NFS_OVERLAY" "/sysroot/storage" "rw,nolock,retrans=10" "nfs"
+
+    if [ ! -d /sysroot/storage/$OVERLAY_DIR ]; then
+      mkdir /sysroot/storage/$OVERLAY_DIR
+    fi
+
+    /bin/busybox umount /sysroot/storage
+    mount_part "$NFS_OVERLAY/$OVERLAY_DIR" "/sysroot/storage" "rw,nolock" "nfs"
+  }
+
   mount_disk() {
     mount_part "$boot" "/flash" "ro,noatime"
 
@@ -198,7 +236,14 @@ NFS_OVERLAY="192.168.1.1:/var/lib/overlay"
   if [ -z "$NETBOOT" ]; then
     mount_disk
   else
-    mount_nbd
+    if [ "$NETBOOT" = "nbd" ]; then
+      mount_nbd
+    elif [ "$NETBOOT" = "nfs" ]; then
+      mount_nfs
+    else
+      error "INIT_2" "Could not find a valid netboot option. Please use nbd or nfs."
+      debug_shell
+    fi
   fi
 
   # unmount all other filesystems
